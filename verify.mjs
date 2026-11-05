@@ -27,10 +27,12 @@ const response = (status, headers={}) => ({getResponseCode:() => status,getAllHe
 function server(now=NOW) {
   const properties = new Map();
   const files = new Map();
+  const permissions = new Map();
   const sessions = new Map();
-  const calls = {generate:0,get:0,list:0,folder:0,fetch:0,quotaRead:0,quotaWrite:0};
+  const calls = {generate:0,get:0,list:0,folder:0,fetch:0,quotaRead:0,quotaWrite:0,permissionList:0,permissionRemove:0};
   const requests = [];
-  const state = {initMode:'normal',chunkMode:'normal',partial:null,override:null,lockAvailable:true,getFail:false};
+  const removedPermissions = [];
+  const state = {initMode:'normal',chunkMode:'normal',partial:null,override:null,lockAvailable:true,getFail:false,permissionListFailAt:null,permissionPageAt:null,permissionMalformedAt:null,permissionRemoveFailAt:null,permissionRemoveMode:''};
   let sequence=0, locked=false, clock=now;
   class Clock extends Date { constructor(...args) { super(...(args.length?args:[clock])); } static now() { return clock; } }
   const setProperty = (name,value) => { if(name==='DAILY_USAGE') { calls.quotaWrite++; assert.ok(locked,'reserve holds ScriptLock'); } properties.set(name,value); };
@@ -52,6 +54,9 @@ function server(now=NOW) {
       create:metadata => { assert.ok(locked); assert.equal(metadata.mimeType,'application/vnd.google-apps.folder'); calls.folder++; return {id:'private_folder_123456'}; },
       get:id => { calls.get++; if(state.getFail||!files.has(id))throw new Error('not found'); return clone(files.get(id)); },
       list:options => { calls.list++; const uploadKey=options.q.match(/value='([a-f0-9]{32})'/)[1]; return {files:[...files.values()].filter(file=>file.appProperties.uploadKey===uploadKey&&!file.trashed).map(clone)}; }
+    },Permissions:{
+      list:(id,options) => { calls.permissionList++; assert.ok(files.has(id)); assert.equal(options.fields,'permissions(id,type),nextPageToken'); assert.equal(options.pageSize,100); if(calls.permissionList===state.permissionListFailAt)throw new Error('OWNER_TOKEN_NEVER_RETURN permission listing failed'); if(calls.permissionList===state.permissionMalformedAt)return {}; return {permissions:clone(permissions.get(id)),...(calls.permissionList===state.permissionPageAt?{nextPageToken:'more'}:{})}; },
+      remove:(id,permissionId) => { calls.permissionRemove++; const permission=permissions.get(id).find(value=>value.id===permissionId); assert.ok(['domain','anyone'].includes(permission?.type),'retain designated collaborators'); if(state.permissionRemoveMode==='throw'||calls.permissionRemove===state.permissionRemoveFailAt)throw new Error('OWNER_TOKEN_NEVER_RETURN permission removal failed'); if(state.permissionRemoveMode!=='ignore'){permissions.set(id,permissions.get(id).filter(value=>value.id!==permissionId));removedPermissions.push(permissionId);} }
     }},
     UrlFetchApp:{fetch:(url,options) => {
       calls.fetch++; requests.push({url,options});
@@ -87,7 +92,10 @@ function server(now=NOW) {
       session.offset=state.partial===null?end+1:Math.min(end+1,offset+state.partial);
       state.partial=null;
       if(session.offset===session.size) {
-        if(!files.has(session.metadata.id))files.set(session.metadata.id,{...session.metadata,size:String(session.size),trashed:false});
+        if(!files.has(session.metadata.id)) {
+          files.set(session.metadata.id,{...session.metadata,size:String(session.size),trashed:false});
+          permissions.set(session.metadata.id,[{id:'owner',type:'user',role:'owner',emailAddress:'bwc-ykl@bwflc.edu.hk'},{id:'editor',type:'user',role:'writer',emailAddress:'bwc-tw@bwflc.edu.hk'},{id:'group',type:'group',role:'reader'},{id:'school',type:'domain',role:'reader'},{id:'anyone',type:'anyone',role:'reader'}]);
+        }
         if(state.chunkMode==='savedThenThrow') {state.chunkMode='normal';throw new Error(url+' OWNER_TOKEN_NEVER_RETURN');}
         return response(200);
       }
@@ -102,7 +110,7 @@ function server(now=NOW) {
   const prepare=(bytes=png,overrides={}) => context.prepareUpload_(config().uploadCode,metadata(bytes,overrides),bytes.subarray(0,65536).toString('base64'));
   const upload=(ticket,bytes=png,offset=0,code=config().uploadCode) => context.uploadChunk_(code,ticket,offset,bytes.toString('base64'));
   const status=(ticket,code=config().uploadCode) => context.getUploadStatus_(code,ticket);
-  return {context,properties,files,sessions,calls,requests,state,config,metadata,prepare,upload,status,locked:()=>locked,setTime:value=>{clock=value;}};
+  return {context,properties,files,permissions,removedPermissions,sessions,calls,requests,state,config,metadata,prepare,upload,status,locked:()=>locked,setTime:value=>{clock=value;}};
 }
 
 function post(s,request) {
@@ -212,9 +220,45 @@ await test('response lost after save is recovered by metadata with transient rec
   const recovered=s.context.prepareUpload_(s.config().uploadCode,metadata,png.toString('base64'));assert.equal(recovered.fileId,ticket.fileId);assert.equal(s.calls.generate,1);assert.equal(s.calls.quotaWrite,1);
 });
 
+await test('completion removes school and public defaults while retaining owner, editor and group',()=>{
+  const s=server(),bytes=large(CHUNK+17),ticket=s.prepare(bytes);
+  assert.equal(s.calls.permissionList,0);assert.equal(s.status(ticket).status,'uploading');
+  assert.equal(s.upload(ticket,bytes.subarray(0,CHUNK)).status,'uploading');assert.equal(s.calls.permissionList,0);
+  assert.equal(s.upload(ticket,bytes.subarray(CHUNK),CHUNK).status,'saved');
+  assert.deepEqual(s.removedPermissions,['school','anyone']);assert.equal(s.calls.permissionList,2);
+  assert.deepEqual(s.permissions.get(ticket.fileId).map(value=>value.id),['owner','editor','group']);
+  assert.equal(s.properties.has('UPLOAD_'+ticket.uploadKey),false);
+  assert.equal(s.status(ticket).status,'saved');assert.equal(s.calls.permissionRemove,2);
+});
+
+await test('privacy failures block success, retain ticket state and retry without duplicate upload',()=>{
+  for(const fault of [{permissionListFailAt:1},{permissionRemoveMode:'throw'},{permissionRemoveFailAt:2},{permissionListFailAt:2},{permissionRemoveMode:'ignore'},{permissionPageAt:1},{permissionPageAt:2},{permissionMalformedAt:1},{permissionMalformedAt:2}]) {
+    const s=server(),ticket=s.prepare(),record=s.properties.get('UPLOAD_'+ticket.uploadKey);Object.assign(s.state,fault);
+    const result=post(s,{id:key(),method:'uploadChunk',args:[s.config().uploadCode,ticket,0,png.toString('base64')]}).reply;
+    assert.equal(result.ok,false,JSON.stringify(fault));assert.equal(result.result,undefined);assert.match(result.error,/分享權限/);assert.doesNotMatch(result.error,/OWNER_TOKEN|googleapis|permission listing|permission removal/);
+    assert.equal(s.files.size,1);assert.equal(s.properties.get('UPLOAD_'+ticket.uploadKey),record);
+    const before=s.calls.fetch;Object.assign(s.state,{permissionListFailAt:null,permissionPageAt:null,permissionMalformedAt:null,permissionRemoveFailAt:null,permissionRemoveMode:''});
+    assert.equal(s.status(ticket).status,'saved');assert.equal(s.calls.fetch,before);assert.equal(s.files.size,1);assert.equal(s.calls.generate,1);assert.equal(s.calls.quotaWrite,1);
+    assert.deepEqual(s.permissions.get(ticket.fileId).map(value=>value.id),['owner','editor','group']);assert.equal(s.properties.has('UPLOAD_'+ticket.uploadKey),false);
+  }
+});
+
+await test('lost response and recovered receipts enforce privacy before accepting completion',()=>{
+  const s=server(),metadata=s.metadata(),ticket=s.context.prepareUpload_(s.config().uploadCode,metadata,png.toString('base64'));
+  s.state.chunkMode='savedThenThrow';assert.throws(()=>s.upload(ticket),/連線中斷/);assert.equal(s.calls.permissionList,0);
+  assert.equal(s.status(ticket).status,'saved');assert.deepEqual(s.removedPermissions,['school','anyone']);
+  s.permissions.get(ticket.fileId).push({id:'school-again',type:'domain',role:'reader'});s.state.permissionRemoveMode='throw';
+  assert.throws(()=>s.context.prepareUpload_(s.config().uploadCode,metadata,png.toString('base64')),/分享權限/);
+  const before=s.calls.fetch;s.state.permissionRemoveMode='';
+  assert.equal(s.context.prepareUpload_(s.config().uploadCode,metadata,png.toString('base64')).fileId,ticket.fileId);assert.equal(s.calls.fetch,before);assert.equal(s.calls.generate,1);assert.equal(s.files.size,1);
+  assert.equal(s.permissions.get(ticket.fileId).some(value=>['domain','anyone'].includes(value.type)),false);
+});
+
 await test('final confirmation checks ID, size, parent, name, MIME and appProperties',()=>{
   const s=server(),ticket=s.prepare();s.upload(ticket);const stored=clone(s.files.get(ticket.fileId));
+  const before=s.calls.permissionList;
   for(const changes of [{id:'wrong'},{size:'1'},{name:'wrong'},{mimeType:'image/jpeg'},{parents:['other']},{parents:[s.config().folderId,'other']},{trashed:true},{appProperties:{uploadKey:ticket.uploadKey,prefixSha256:'0'.repeat(64)}},{appProperties:{...stored.appProperties,expiresAt:'0'}}]){s.files.set(ticket.fileId,{...stored,...changes});assert.throws(()=>s.status(ticket),/已儲存檔案不符/);}
+  assert.equal(s.calls.permissionList,before);
   s.files.set(ticket.fileId,stored);assert.equal(s.status(ticket).status,'saved');
 });
 

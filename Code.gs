@@ -178,6 +178,17 @@ function completed_(ticket, config) {
       !file.appProperties || file.appProperties.uploadKey !== ticket.uploadKey || file.appProperties.prefixSha256 !== ticket.prefixSha256 || file.appProperties.expiresAt !== String(ticket.expiresAt)) {
     throw new Error('此上傳編號與已儲存檔案不符，請聯絡收相人核對。');
   }
+  try {
+    const broadPermissions = function () {
+      const result = Drive.Permissions.list(ticket.fileId, {fields: 'permissions(id,type),nextPageToken', pageSize: 100});
+      if (!result || !Array.isArray(result.permissions) || result.nextPageToken ||
+          result.permissions.some(function (permission) { return !permission || typeof permission.id !== 'string' || !['user', 'group', 'domain', 'anyone'].includes(permission.type); })) throw new Error();
+      return result.permissions.filter(function (permission) { return permission.type === 'domain' || permission.type === 'anyone'; });
+    };
+    const broad = broadPermissions();
+    broad.forEach(function (permission) { Drive.Permissions.remove(ticket.fileId, permission.id); });
+    if (broad.length && broadPermissions().length) throw new Error();
+  } catch (error) { throw new Error('暫時未能確認檔案分享權限已受限制。請保留此頁並按重試；如持續失敗，請聯絡收相人。'); }
   return true;
 }
 
