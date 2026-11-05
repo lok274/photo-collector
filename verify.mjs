@@ -45,6 +45,7 @@ function server(now=NOW) {
     })},
     LockService:{getScriptLock:() => ({waitLock:() => { assert.equal(locked,false); locked=true; },tryLock:() => { if(!state.lockAvailable)return false; assert.equal(locked,false); locked=true; return true; },releaseLock:() => { assert.ok(locked); locked=false; }})},
     HtmlService:{XFrameOptionsMode:{ALLOWALL:'ALLOWALL'},createHtmlOutput:content => ({content,setXFrameOptionsMode(mode){this.mode=mode;return this;}})},
+    ContentService:{MimeType:{JSON:'JSON'},createTextOutput:content => ({content,setMimeType(mime){this.mime=mime;return this;}})},
     Utilities:{getUuid:randomUUID,base64Encode:bytes => Buffer.from(bytes).toString('base64'),base64Decode:value => [...Buffer.from(value,'base64')],base64EncodeWebSafe:bytes => Buffer.from(bytes).toString('base64url'),
       computeHmacSha256Signature:(value,secret) => [...createHmac('sha256',secret).update(value).digest()],DigestAlgorithm:{SHA_256:'sha256'},computeDigest:(_algorithm,bytes) => [...createHash('sha256').update(Buffer.from(bytes)).digest()],
       formatDate:date => new Date(date.getTime()+8*3600000).toISOString().slice(0,10)},
@@ -126,7 +127,7 @@ await test('syntax, private entry points, exact scopes and unchanged setup',()=>
   assert.deepEqual(manifest.oauthScopes,['https://www.googleapis.com/auth/drive.file','https://www.googleapis.com/auth/script.external_request']);
   assert.deepEqual(manifest.dependencies.enabledAdvancedServices,[{userSymbol:'Drive',version:'v3',serviceId:'drive'}]);
   assert.deepEqual(manifest.webapp,{executeAs:'USER_DEPLOYING',access:'ANYONE_ANONYMOUS'});
-  assert.doesNotMatch(html,/hmacSecret|COLLECTOR_CONFIG|google\.script\.run|fetch\(/);
+  assert.doesNotMatch(html,/hmacSecret|COLLECTOR_CONFIG|google\.script\.run/);
   assert.doesNotMatch(html,/<script[^>]*\bsrc\s*=|<link[^>]*\bhref\s*=/i);
   const s=server(),config=s.properties.get('COLLECTOR_CONFIG');
   s.properties.set('DAILY_USAGE','{"day":"2026-11-05","bytes":123}');s.context.setup_();
@@ -143,6 +144,24 @@ await test('POST whitelist, bounded requests, fixed reply origin and HTML escapi
   assert.equal(post(s,{id,method:'uploadChunk',args:[s.config().uploadCode,ticket,0,png.toString('base64')]}).reply.result.status,'saved');
   for(const request of [{id,method:'setup_',args:[]},{id,method:'constructor',args:[]},{id,method:'uploadPhoto',args:[]},{id,method:'prepareUpload',args:[]},{id:'bad',method:'getUploadStatus',args:[]},null,[], '{bad', ' '.repeat(6*MiB+1)])assert.equal(post(s,request).reply.ok,false);
   assert.doesNotMatch(JSON.stringify(prepared.reply),/upload_id|OWNER_TOKEN|session/);
+});
+
+await test('plain-text JSON transport retains whitelist, authentication, cutoff and receipt contract',()=>{
+  const s=server(),id=key();
+  const send=request=>{
+    const output=s.context.doPost({postData:{type:'text/plain;charset=UTF-8',contents:typeof request==='string'?request:JSON.stringify(request)}});
+    assert.equal(output.mime,'JSON');assert.equal(output.mode,undefined);
+    return JSON.parse(output.content);
+  };
+  const request={id,method:'prepareUpload',args:[s.config().uploadCode,s.metadata(),png.toString('base64')]};
+  const prepared=send(request);assert.equal(prepared.ok,true);assert.equal(prepared.id,id);assert.equal(prepared.method,'prepareUpload');
+  const ticket=prepared.result;
+  assert.equal(send({id,method:'getUploadStatus',args:[s.config().uploadCode,ticket]}).result.offset,0);
+  assert.equal(send({id,method:'uploadChunk',args:[s.config().uploadCode,ticket,0,png.toString('base64')]}).result.status,'saved');
+  assert.doesNotMatch(JSON.stringify(prepared),/upload_id|OWNER_TOKEN|session/);
+  for(const invalid of ['{bad',' '.repeat(6*MiB+1),{id,method:'setup_',args:[]}])assert.equal(send(invalid).ok,false);
+  const before={...s.calls};assert.equal(send({...request,args:['wrong',request.args[1],request.args[2]]}).ok,false);assert.deepEqual(s.calls,before);
+  s.setTime(DEADLINE);assert.equal(send(request).ok,false);assert.deepEqual(s.calls,before);
 });
 
 await test('code, ticket and deadline checks precede Drive, quota and network access',()=>{
@@ -298,21 +317,32 @@ class Element {
 function frontend(connected=true,now=NOW,origin='https://lok274.github.io') {
   const s=server(now),elements=new Map(),listeners=new Map(),timers=new Map(),requests=[],reads=[];
   const body=new Element('body');let timerSequence=0,clock=now;
-  const state={autoReply:true,losePrepare:false,loseChunk:false,nextResult:null};
+  const state={autoReply:true,losePrepare:false,loseChunk:false,nextResult:null,aborted:0};
+  const pending=[];
   class Clock extends Date{constructor(...args){super(...(args.length?args:[clock]));}static now(){return clock;}}
-  const dispatch=(data,origin='https://script.googleusercontent.com')=>{for(const listener of [...(listeners.get('message')||[])])listener({data,origin});};
-  const submit=form=>{
-    const request=JSON.parse(form.children.find(child=>child.name==='payload').value);requests.push(request);
-    assert.equal(form.action,'https://script.google.com/macros/s/TEST_DEPLOYMENT/exec');assert.equal(form.method,'POST');assert.ok(body.children.some(child=>child.tagName==='iframe'&&child.name===form.target));
-    if(!state.autoReply)return;
-    let reply;
-    if(state.nextResult){reply={id:request.id,method:request.method,ok:true,result:state.nextResult};state.nextResult=null;}
-    else reply=post(s,request).reply;
-    if((request.method==='prepareUpload'&&state.losePrepare)||(request.method==='uploadChunk'&&state.loseChunk)){state.losePrepare=false;state.loseChunk=false;reply={id:request.id,method:request.method,ok:false,error:'測試模擬連線中斷，請保留此頁並重試。'};}
-    queueMicrotask(()=>dispatch(reply));
+  const dispatch=(data,options={})=>{
+    const item=pending.shift();assert.ok(item);item.detach();
+    item.resolve({ok:true,type:'cors',url:'https://script.googleusercontent.com/macros/echo?user_content_key=fixture',text:async()=>options.body??JSON.stringify(data),...options});
   };
-  const context=vm.createContext({Date:Clock,crypto:webcrypto,location:{origin},
-    document:{body,getElementById:id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);},createElement:tag=>{const element=new Element(tag);if(tag==='form')element.submit=()=>submit(element);return element;}},
+  const fetch=(url,options)=>{
+    const request=JSON.parse(options.body);requests.push(request);
+    assert.equal(url,'https://script.google.com/macros/s/TEST_DEPLOYMENT/exec');assert.equal(options.method,'POST');
+    assert.equal(options.mode,'cors');assert.equal(options.credentials,'omit');assert.equal(options.redirect,'follow');
+    assert.equal(options.headers['Content-Type'],'text/plain;charset=UTF-8');assert.equal(options.cache,'no-store');assert.equal(options.referrerPolicy,'no-referrer');
+    return new Promise((resolve,reject)=>{
+      const item={resolve,detach:()=>options.signal.removeEventListener('abort',abort)};
+      const abort=()=>{state.aborted++;pending.splice(pending.indexOf(item),1);reject(new DOMException('aborted','AbortError'));};
+      options.signal.addEventListener('abort',abort,{once:true});pending.push(item);
+      if(!state.autoReply)return;
+      let reply;
+      if(state.nextResult){reply={id:request.id,method:request.method,ok:true,result:state.nextResult};state.nextResult=null;}
+      else {const output=s.context.doPost({postData:{type:'text/plain',contents:options.body}});assert.equal(output.mime,'JSON');reply=JSON.parse(output.content);}
+      if((request.method==='prepareUpload'&&state.losePrepare)||(request.method==='uploadChunk'&&state.loseChunk)){state.losePrepare=false;state.loseChunk=false;reply={id:request.id,method:request.method,ok:false,error:'測試模擬連線中斷，請保留此頁並重試。'};}
+      queueMicrotask(()=>dispatch(reply));
+    });
+  };
+  const context=vm.createContext({Date:Clock,crypto:webcrypto,location:{origin},AbortController,fetch,
+    document:{body,getElementById:id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);},createElement:tag=>new Element(tag)},
     URL:{createObjectURL:()=>'blob:local',revokeObjectURL:()=>{}},window:{addEventListener(name,listener){if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(listener);},removeEventListener(name,listener){listeners.get(name)?.delete(listener);}},
     setTimeout:(callback,delay)=>{const id=++timerSequence;timers.set(id,{delay,callback:()=>{timers.delete(id);callback();}});return id;},clearTimeout:id=>timers.delete(id),
     FileReader:class{readAsDataURL(blob){assert.ok(blob.size<=CHUNK,'FileReader reads bounded chunks');reads.push({kind:'base64',size:blob.size,start:blob.start});this.result='data:;base64,'+blob.bytes.toString('base64');queueMicrotask(()=>this.onload());}}
@@ -387,18 +417,22 @@ await test('preview mode and client cutoff stop requests and preserve saved outc
   const late=frontend(true,DEADLINE+1);assert.equal(late.elements.get('photos').disabled,true);assert.match(html,/請在截止前完成上傳；截止後未完成的檔案不能繼續傳送/);
 });
 
-await test('postMessage validates origin, random nonce, method and reply schema',async()=>{
-  const f=frontend();f.state.autoReply=false;const pending=f.run("rpc('prepareUpload', ['code', {}, 'data'])"),request=f.requests[0];assert.match(request.id,/^[a-f0-9]{32}$/);
-  const valid={id:request.id,method:request.method,ok:true,result:{fileId:'valid'}};
-  for(const origin of ['null','http://script.google.com','https://evil.example','https://script.googleusercontent.com.evil.example','https://attacker-script.google.com'])f.dispatch(valid,origin);
-  for(const reply of [null,{}, {...valid,id:'f'.repeat(32)},{...valid,method:'uploadChunk'},{...valid,ok:'true'},{...valid,result:null},{...valid,ok:false,error:42}])f.dispatch(reply);
-  assert.equal(f.rpcTimers().length,1);f.dispatch(valid,'https://abc-123-script.googleusercontent.com');assert.deepEqual(await pending,{fileId:'valid'});assert.equal(f.rpcTimers().length,0);assert.equal(f.body.children.length,0);assert.equal(f.listeners.get('message').size,0);
+await test('JSON fetch validates final Google URL, readable HTTP reply, random nonce, method and schema',async()=>{
+  for(const mutate of [r=>null,r=>({}),r=>({...r,id:'f'.repeat(32)}),r=>({...r,method:'uploadChunk'}),r=>({...r,ok:'true'}),r=>({...r,result:null}),r=>({...r,ok:false,error:42})]){
+    const f=frontend();f.state.autoReply=false;const pending=f.run("rpc('prepareUpload', ['code', {}, 'data'])"),request=f.requests[0];assert.match(request.id,/^[a-f0-9]{32}$/);
+    const rejection=assert.rejects(pending,/回覆/);f.dispatch(mutate({id:request.id,method:request.method,ok:true,result:{fileId:'valid'}}));await rejection;assert.equal(f.rpcTimers().length,0);
+  }
+  for(const options of [{url:'https://evil.example/'},{url:'https://script.googleusercontent.com.evil.example/macros/echo?x=1'},{type:'opaque'},{ok:false},{body:'<html>not JSON</html>'},{body:'x'.repeat(65537)}]){
+    const f=frontend();f.state.autoReply=false;const pending=f.run("rpc('prepareUpload', ['code', {}, 'data'])"),request=f.requests[0];const rejection=assert.rejects(pending,/回覆/);
+    f.dispatch({id:request.id,method:request.method,ok:true,result:{}},options);await rejection;assert.equal(f.rpcTimers().length,0);
+  }
+  const f=frontend();f.state.autoReply=false;const pending=f.run("rpc('prepareUpload', ['code', {}, 'data'])"),request=f.requests[0];f.dispatch({id:request.id,method:request.method,ok:true,result:{fileId:'valid'}});assert.deepEqual(clone(await pending),{fileId:'valid'});assert.equal(f.body.children.length,0);
   await assert.rejects(f.run("rpc('setup_', [])"),/要求無效/);
 });
 
 await test('transport timeout cleans up and never automatically replays writes',async()=>{
   const f=frontend();f.state.autoReply=false;const pending=f.run("rpc('uploadChunk', ['code', {}, 0, 'data'])"),rejection=assert.rejects(pending,/連線逾時/);assert.equal(f.rpcTimers()[0].delay,120000);f.rpcTimers()[0].callback();await rejection;
-  assert.equal(f.requests.length,1);assert.equal(f.body.children.length,0);assert.equal(f.listeners.get('message').size,0);assert.equal(f.rpcTimers().length,0);
+  assert.equal(f.requests.length,1);assert.equal(f.body.children.length,0);assert.equal(f.state.aborted,1);assert.equal(f.rpcTimers().length,0);
 });
 
 await test('a real client retry timeout retains the original ticket and needs another click',async()=>{
@@ -409,4 +443,4 @@ await test('a real client retry timeout retains the original ticket and needs an
   assert.deepEqual(f.states(),['failed']);assert.deepEqual(clone(f.run('rows[0].ticket')),ticket);assert.equal(f.requests.length,count);assert.match(f.run('rows[0].error'),/連線逾時/);
 });
 
-console.log('\n'+passed+' checks passed. Mock services only. Real Google authorization, file sharing, phone codecs and 2 GiB uploads still require verification.');
+console.log('\n'+passed+' checks passed with mock services. See README for separate live checks; physical phones and full 2 GiB transfers remain unverified.');
