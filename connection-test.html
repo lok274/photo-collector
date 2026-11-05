@@ -1,0 +1,7 @@
+<!doctype html><meta charset="utf-8"><title>收相盒連線測試</title><p id="support"></p><p id="regular">一般連線：等待回覆</p><p id="anonymous">獨立連線：等待回覆</p><script>
+const endpoint='https://script.google.com/macros/s/AKfycbyAxiBEgnO4CA3r-9fc5OuXLXgoSmRq0lcrlsmw4HPhD3jWuTefanXBGoJmWt5H60ZY/exec';
+const pending=new Map();
+document.getElementById('support').textContent='credentialless 支援：'+('credentialless' in document.createElement('iframe'));
+window.addEventListener('message',e=>{if(!/^https:\/\/(?:script\.google\.com|(?:[a-z0-9-]+-)?script\.googleusercontent\.com)$/.test(e.origin))return;const item=e.data&&pending.get(e.data.id);if(item){document.getElementById(item).textContent=item+'：'+String(e.data.error||e.data.ok);pending.delete(e.data.id);}});
+for(const key of ['regular','anonymous']){const id=Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');pending.set(id,key);const frame=document.createElement('iframe');frame.name='probe_'+id;frame.hidden=true;if(key==='anonymous')frame.credentialless=true;const form=document.createElement('form');form.method='POST';form.action=endpoint;form.target=frame.name;form.hidden=true;const input=document.createElement('input');input.type='hidden';input.name='payload';input.value=JSON.stringify({id,method:'prepareUpload',args:['wrong-probe-code',{},'']});form.append(input);document.body.append(frame,form);form.submit();}
+</script>
