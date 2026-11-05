@@ -11,8 +11,9 @@ function doGet() {
 
 function doPost(event) {
   const reply = {id: '', method: '', ok: false};
+  const jsonRequest = Boolean(event && event.postData && /^text\/plain(?:;|$)/i.test(event.postData.type || ''));
   try {
-    const payload = event && event.parameter && event.parameter.payload;
+    const payload = jsonRequest ? event.postData.contents : event && event.parameter && event.parameter.payload;
     if (typeof payload !== 'string' || payload.length > MAX_RPC_CHARS_) throw new Error('上傳要求無效或太大。');
     const request = JSON.parse(payload);
     if (!request || typeof request !== 'object' || Array.isArray(request) ||
@@ -28,6 +29,7 @@ function doPost(event) {
     reply.error = error instanceof SyntaxError ? '上傳要求無效。' : String(error.message || '服務暫時未能回應，請保留此頁並重試。').slice(0, 400);
   }
   const json = JSON.stringify(reply).replace(/</g, '\\u003c');
+  if (jsonRequest) return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);
   return HtmlService.createHtmlOutput('<!doctype html><meta charset="utf-8"><script>window.top.postMessage(' + json + ', ' + JSON.stringify(PAGE_ORIGIN_) + ');</script>')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
