@@ -155,7 +155,6 @@
         form.append(payload);
         const cleanup = () => {
           clearTimeout(timer);
-          frame.onload = null;
           window.removeEventListener('message', receive);
           form.remove();
           frame.remove();
@@ -174,11 +173,8 @@
           reject(new Error('連線逾時，未能確認是否已儲存。請保留此頁，按「重試」核對及繼續上傳。'));
         }, 120000);
         window.addEventListener('message', receive);
-        frame.onload = () => {
-          frame.onload = null;
-          try { form.submit(); } catch (error) { cleanup(); reject(error); }
-        };
-        document.body.append(form, frame);
+        document.body.append(frame, form);
+        try { form.submit(); } catch (error) { cleanup(); reject(error); }
       });
     }
 

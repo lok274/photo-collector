@@ -290,7 +290,7 @@ class Element {
   addEventListener(name,listener){this.listeners[name]=listener;}
   setAttribute(name,value){this[name]=value;}
   replaceChildren(...children){this.children=[];this.append(...children);}
-  append(...children){for(const child of children){this.children.push(child);child.parent=this;if(child.tagName==='iframe'&&this.autoFrameLoad!==false)child.onload?.();}}
+  append(...children){for(const child of children){this.children.push(child);child.parent=this;}}
   remove(){if(this.parent)this.parent.children=this.parent.children.filter(child=>child!==this);}
   focus(){this.focused=true;}
 }
@@ -385,17 +385,6 @@ await test('preview mode and client cutoff stop requests and preserve saved outc
   for(const id of ['upload-code','photos','upload'])assert.equal(f.elements.get(id).disabled,true);
   for(const method of ['prepareUpload','uploadChunk','getUploadStatus'])await assert.rejects(f.run("rpc('"+method+"', [])"),/截止/);
   const late=frontend(true,DEADLINE+1);assert.equal(late.elements.get('photos').disabled,true);assert.match(html,/請在截止前完成上傳；截止後未完成的檔案不能繼續傳送/);
-});
-
-await test('frame is ready before POST and later loads cannot replay it',async()=>{
-  const f=frontend();f.body.autoFrameLoad=false;f.state.autoReply=false;
-  const pending=f.run("rpc('prepareUpload', ['code', {}, 'data'])");
-  assert.equal(f.requests.length,0);const frame=f.body.children.find(child=>child.tagName==='iframe');frame.onload();
-  assert.equal(f.requests.length,1);assert.equal(frame.onload,null);
-  const request=f.requests[0];f.dispatch({id:request.id,method:request.method,ok:true,result:{fileId:'valid'}});await pending;
-  const late=f.run("rpc('prepareUpload', ['code', {}, 'data'])"),rejected=assert.rejects(late,/連線逾時/);
-  const lateFrame=f.body.children.find(child=>child.tagName==='iframe');f.rpcTimers()[0].callback();await rejected;
-  assert.equal(lateFrame.onload,null);assert.equal(f.requests.length,1);
 });
 
 await test('postMessage validates origin, random nonce, method and reply schema',async()=>{

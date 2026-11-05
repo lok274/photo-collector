@@ -65,6 +65,10 @@ node verify.mjs
 
 模擬測試檢查來源及憑證驗證、截止前後、2 GiB 上限、支援格式標頭、分段大小及編碼、308 部分進度、遺失回覆後續傳、不重複扣額度、完成檔案核對、網域及公開權限移除、協作者保留、權限核對失敗後以原憑證重試、設定保留、前端小段讀取、預覽、固定來源及逾時清理。
 
-**模擬測試不能證明真實 2 GiB 手機上傳已可用。** 本版仍須在正式部署後，以未登入 Google 的瀏覽器測試錯碼、相片、影片及超過兩段的檔案，核對擁有人 Drive 中的內容、大小及分享權限，再用實際 Apple／Android 手機及接近 2 GiB 的檔案測試。網絡、手機背景暫停、學校政策及 Google 配額都可能令上傳失敗；不要把程式設定上限當成已實測的容量保證。
+2026-11-05 已完成正式部署：GitHub Pages 使用 `main` 根目錄；學校帳戶的 Apps Script 為第 3 版。29 項模擬檢查通過。未登入 Google 的內置瀏覽器已實際驗證錯碼拒絕，並成功上載 PNG、JPEG、HEIC、MOV、MP4 及 11,702,339 bytes 的 MP4；較大影片以三段傳送。Drive 清單已核對檔名、擁有人及顯示大小，MOV 和三段 MP4 的共用視窗確認一般存取權為「受限」，原有指定協作者仍保留。沒有下載整檔比對雜湊。
+
+**Chrome 的現有登入環境仍有逾時，尚未找出確切原因。** 最小獨立表單測試亦出現未收到回覆；隔離 cookie 與等待框架載入的試改沒有證實有效，已撤回並移除公開診斷頁。私人瀏覽模式尚未實測。電腦操作工具其後因無法可靠確認 Windows 瀏覽器網址而停止，沒有繼續操作瀏覽器。
+
+**2 GiB 是程式上限，並非已實測的容量保證。** 尚未用實際 Apple／Android 手機及接近 2 GiB 的檔案驗收，亦未實際中斷網絡再續傳。網絡、手機背景暫停、學校政策及 Google 配額都可能令上傳失敗。正式大量收檔前應先以實際手機及網絡做一次測試；連線持續失敗時，可嘗試私人瀏覽，重新選取前先請收相人核對 Drive，避免重複交檔。
 
 Google 官方參考包括 [Drive resumable uploads](https://developers.google.com/workspace/drive/api/guides/manage-uploads#resumable)、[Advanced Drive service](https://developers.google.com/apps-script/advanced/drive)、[UrlFetchApp](https://developers.google.com/apps-script/reference/url-fetch/url-fetch-app)、[預先產生檔案編號](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/generateIds)、[網頁應用程式部署](https://developers.google.com/apps-script/guides/web)，以及 [Apps Script 配額](https://developers.google.com/apps-script/guides/services/quotas)。
