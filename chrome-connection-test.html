@@ -1,0 +1,10 @@
+<!doctype html><meta charset="utf-8"><title>Chrome 收相連線診斷</title><h1>Chrome 收相連線診斷</h1><p>只傳送錯誤測試碼，不會上載檔案或建立 Drive 資料。</p><pre id="state"></pre><form id="probe" method="post" target="googleReply" action="https://script.google.com/macros/s/AKfycbyAxiBEgnO4CA3r-9fc5OuXLXgoSmRq0lcrlsmw4HPhD3jWuTefanXBGoJmWt5H60ZY/exec"><input id="payload" name="payload" type="hidden"><button type="submit">測試原生表單</button><button id="dynamic" type="button">測試動態表單</button></form><iframe name="googleReply" title="Google 回覆"></iframe><script>
+const state=document.getElementById('state'), pending=new Set();
+const line=value=>state.textContent+='\n'+value;
+line('origin='+location.origin+'; top='+(window===window.top));
+function payload(){const id=Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');pending.add(id);return JSON.stringify({id,method:'prepareUpload',args:['wrong-diagnostic-code',{},'']});}
+window.addEventListener('message',e=>{const r=e.data;line('message origin='+e.origin+'; type='+typeof r+'; match='+(r&&pending.has(r.id))+'; method='+(r&&r.method)+'; ok='+(r&&r.ok)+'; error='+(r&&typeof r.error==='string'?r.error.slice(0,100):''));});
+document.querySelector('iframe').addEventListener('load',()=>line('frame load '+new Date().toISOString()));
+document.getElementById('probe').addEventListener('submit',()=>{document.getElementById('payload').value=payload();line('native POST '+new Date().toISOString());});
+document.getElementById('dynamic').onclick=()=>{const frame=document.createElement('iframe');frame.name='dynamicReply';frame.title='動態 Google 回覆';const form=document.createElement('form');form.method='POST';form.action=document.getElementById('probe').action;form.target=frame.name;const input=document.createElement('input');input.name='payload';input.type='hidden';input.value=payload();form.append(input);document.body.append(frame,form);form.submit();line('dynamic POST '+new Date().toISOString());};
+</script>
